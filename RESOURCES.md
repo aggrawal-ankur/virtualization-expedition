@@ -5,3 +5,6 @@
 3. [Popek-Goldberg Paper, 1974](https://www.cs.cornell.edu/courses/cs6411/2018sp/papers/popek-goldberg.pdf)
 4. [QEMU Documentation](https://www.qemu.org/docs/master/)
 5. [Intel® 64 and IA-32 Architectures Software Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
+6. [Hypervisor From Scratch](https://rayanfam.com/tutorials/)
+7. [The Basics of Intel VT-x Extensions](https://research.meekolab.com/the-basics-of-intel-vt-x-extensions)
+8. [Hardware Virtualization Support](https://www.onenoughtone.com/learn/hardware-virtualization-support/1)
