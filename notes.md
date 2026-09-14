@@ -525,3 +525,61 @@ A shadow VMCS differs from an ordinary VMCS in two ways:
 In VMX root operation, both types of VMCSs can be accessed with the VMREAD and VMWRITE instructions.
 
 Software should not modify the shadow-VMCS indicator in the VMCS region of a VMCS that is active. Doing so may cause the VMCS to become corrupted. Before modifying the shadow-VMCS indicator, software should execute VMCLEAR for the VMCS to ensure that it is not active.
+
+# Chapter 28
+
+In a virtualized environment using VMX, the guest software stack typically runs on a logical processor in VMX non-root operation. This mode of operation is similar to that of ordinary processor operation outside of the virtualized environment.
+
+This chapter describes the differences between VMX non-root operation and ordinary processor operation with special attention to causes of VM exits (which bring a logical processor from VMX non-root operation to root operation).
+
+### 28.1 INSTRUCTIONS THAT CAUSE VM EXITS
+
+Certain instructions may cause VM exits if executed in VMX non-root operation. Unless otherwise specified, such VM exits are "fault-like", meaning that the instruction causing VM exit does not execute and no processor state is updated by the instruction.
+
+### 28.1.1 Relative Priority of Faults and VM Exits
+
+This section defines the prioritization between faults and VM exits for instructions subject to both.
+
+The following principles describe the ordering between existing faults and VM exits:
+
+1. **Certain exceptions have priority over VM exits.** These include invalid-opcode exceptions, faults based on privilege level, and general-protection exceptions that are based on checking I/O permission bits in the task-state segment (TSS). For example, execution of `RDMSR` with CPL=3 generates a general-protection exception, not a VM exit.
+
+2. Faults incurred while fetching instruction operands have priority over VM exits that are conditioned based on the contents of those operands.
+
+3. VM exits caused by execution of the `INS` and `OUTS` instructions, resulting either because the "unconditional I/O exiting” VM-execution control is 1 or because the "use I/O bitmaps control" is 1, have priority over the following faults:
+   - A general-protection fault due to the relevant segment (ES for INS; DS for OUTS unless overridden by an instruction prefix) being unusable.
+   - A general-protection fault due to an offset beyond the limit of the relevant segment.
+   - An alignment-check exception.
+
+4. Fault-like VM exits have priority over exceptions other than those mentioned above. For example, RDMSR of a non-existent MSR with CPL = 0 generates a VM exit and not a general-protection exception.
+
+### 28.1.2 Instructions That Cause VM Exits Unconditionally
+
+This section identifies instructions that cause VM exits whenever they are executed in VMX non-root operation, and thus can never be executed in VMX non-root operation.
+
+When an instruction execution that may lead to a VM exit is identified, it is assumed that the instruction does not incur a fault that takes priority over a VM exit.
+
+---
+
+The following instructions cause VM exits when they are executed in VMX non-root operation: CPUID, GETSEC, INVD, and XSETBV. This is also true of instructions introduced with VMX: INVEPT, INVVPID, SEAMCALL, TDCALL, VMCALL, VMCLEAR, VMLAUNCH, VMPTRLD, VMPTRST, VMRESUME, VMXOFF, and VMXON.
+
+### 28.1.3 Instructions That Cause VM Exits Conditionally
+
+This section identifies instructions that cause VM exits depending on the settings of certain VM-execution control fields.
+
+When an instruction execution that may lead to a VM exit is identified, it is assumed that the instruction does not incur a fault that takes priority over a VM exit.
+
+---
+
+Certain instructions cause VM exits in VMX non-root operation depending on the setting of the VM-execution
+controls. The following instructions can cause "fault-like" VM exits based on the conditions described.
+
+[LOTS OF INSTRUCTIONS/CONDITIONS]
+
+## 28.2 OTHER CAUSES OF VM EXITS
+
+[LOTS OF INSTRUCTIONS/CONDITIONS]
+
+## 28.3 CHANGES TO INSTRUCTION BEHAVIOR IN VMX NON-ROOT OPERATION
+
+[LOTS OF INSTRUCTIONS/CONDITIONS]
