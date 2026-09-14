@@ -211,13 +211,163 @@ The following fields in the guest-state area correspond to processor registers:
 
 3. RSP, RIP, and RFLAGS (64 bits each; 32 bits on processors that do not support Intel 64 architecture).
 
-<!-- 4. The following fields for each of the registers CS, SS, DS, ES, FS, GS, LDTR, and TR:
+4. The following fields for each of the registers CS, SS, DS, ES, FS, GS, LDTR, and TR:
    - Selector (16 bits).
    - Base address (64 bits; 32 bits on processors that do not support Intel 64 architecture). The base-address fields for CS, SS, DS, and ES have only 32 architecturally-defined bits; nevertheless, the corresponding VMCS fields have 64 bits on processors that support Intel 64 architecture.
    - Segment limit (32 bits). The limit field is always a measure in bytes.
-     - Access rights (32 bits).
-     - Bit 3:0 represent the segment type, bit 4 is the (S) descriptor type (0 for system and 1 for code/data), bit 6:5 represent the descriptor privilege level (DPL), and bit 7 represent the segment present (P).
+   - Access rights (32 bits).
      - The low 16 bits correspond to bits `23:8` of the upper 32 bits of a 64-bit segment descriptor. While bits 19:16 of code-segment and data-segment descriptors correspond to the upper 4 bits of the segment limit, the corresponding bits (bits 11:8) are reserved in this VMCS field.
      - Bit 16 indicates an unusable segment. Attempts to use such a segment fault except in 64-bit mode. In general, a segment register is unusable if it has been loaded with a null selector. There are a few exceptions to this statement.
      - Bits 31:17 are reserved.
--->
+
+     | Bit Position(s) | Field |
+     | --------------- | ----- |
+     | 3:0 | Segment type |
+     | 4 | (S) - Descriptor type (0:system, 1:code/data) |
+     | 6:5 | (DPL) - Descriptor privilege level |
+     | 7 | (P) - Segment present |
+     | 11:8 | Reserved |
+     | 12 | (AVL) - Available for use by system software |
+     | 13 | Reserved (except CS) |
+     | | (L) - 64-bit mode active (CS only) |
+     | 14 | (D/B) - Default operation size (0: 16-bit segment, 1: 32-bit segment) |
+     | 15 | (G) - Granularity |
+     | 16 | Segment usability (0:usable, 1:unusable) |
+     | 31:17 | Reserved |
+
+   - The base address, segment limit, and access rights compose the "hidden" part (or "descriptor cache") of each segment register. These data are included in the VMCS because it is possible for a segment register's descriptor cache to be inconsistent with the segment descriptor in memory (in the GDT or the LDT) referenced by the segment register's selector.
+
+   - The value of the DPL field for SS is always equal to the logical processor's current privilege level (CPL).
+   - On some processors, executions of VMWRITE ignore attempts to write non-zero values to any of bits 11:8 or bits 31:17. On such processors, VMREAD always returns 0 for those bits, and VM entry treats those bits as if they were all 0.
+
+5. Base address (64 bits; 32 bits that don't support I-64 arc) and Limit (32 bits) fields for GDTR and IDTR registers.
+6. Lots of MSRs.
+7. The shadow-stack pointer register `SSP` (64 bits; 32 bits on processors that do not support Intel 64 architecture). This field is supported only on processors that support the 1-setting of the "load CET state" VM-entry control.
+8. The register `SMBASE` (32 bits). This register contains the base address of the logical processor's `SMRAM` image.
+
+### 27.4.2 Guest Non-Register State
+
+The guest-state area also includes the following fields that characterize guest state but they don't correspond to processor registers.
+
+1. **Activity state**: A 32-bit field that identifies the logical processor's activity state. When a logical processor is executing instructions normally, it is in the active state. Execution of certain instructions and the occurrence of certain events may cause a logical processor to transition to an **inactive state** in which it ceases to execute instructions. The following activity states are defined:
+
+   | State | Description | Value |
+   | ----- | ----------- | ----- |
+   | Active | 0 | The logical processor is executing instructions normally. |
+   | HLT | 1 | The logical processor is inactive because it executed the HLT instruction. |
+   | Shutdown | 2 | The logical processor is inactive because it incurred a *triple fault* or some other serious
+   error. |
+   | Wait-for-SIPI | 3 | The logical processor is inactive because it is waiting for a startup-IPI (SIPI). |
+
+   Note that the execution of the `MWAIT` instruction may put a logical processor into an inactive state.However, this VMCS field never reflects this state.
+
+   Future processors may include support for other activity states. Software should read the VMX capability MSR `IA32_VMX_MISC` to determine what activity states are supported.
+
+2. **Interruptibility state**: The IA-32 architecture includes features that permit certain events to be blocked for a period of time. This 32-bits field contains information about such blocking.
+
+3. **Pending debug exceptions**: IA-32 processors may recognize one or more debug exceptions without immediately delivering them. This 64-bit field (or 32-bit, if I-64 arch isn't supported) contains information about such exceptions.
+
+4. **VMCS link pointer**: If the "VMCS shadowing" VM-execution control is 1, the `VMREAD` and `VMWRITE` instructions access the VMCS referenced by this pointer (a 64-bit field). Otherwise, software should set this field to `FFFFFFFF_FFFFFFFFH` to avoid VM-entry failures.
+
+5. **VMX-preemption timer value**: This 32-bit field contains the value that the VMX-preemption timer will use following the next VM entry with that setting. It is supported only on processors that support the 1-setting of the "activate VMX-preemption timer" VM-execution control.
+
+6. **Page-directory-pointer-table entries** (PDPTEs; 64 bits each). These four fields (`PDPTE0`, `PDPTE1`, `PDPTE2`, and `PDPTE3`) are supported only on processors that support the 1-setting of the "enable EPT" VM-execution control. They correspond to the PDPTEs referenced by CR3 when PAE paging is in use. They are used only if the "enable EPT" VM-execution control is 1.
+
+7. **Guest interrupt status**: This 16-bit field characterizes part of the guest’s virtual-APIC state and does not correspond to any processor or APIC registers. It comprises two 8-bit subfields:
+
+   - **Requesting virtual interrupt (RVI)**: This is the low byte of the guest interrupt status. The processor treats this value as the vector of the highest priority virtual interrupt that is requesting service. The value 0 implies that there is no such interrupt.
+
+   - **Servicing virtual interrupt (SVI)**: This is the high byte of the guest interrupt status. The processor treats this value as the vector of the highest priority virtual interrupt that is in service. The value 0 implies that there is no such interrupt.
+
+   This field is supported only on processors that support the 1-setting of the "virtual-interrupt delivery" VM-execution control.
+
+8. **PML index**: This 16-bit field contains the logical index of the next entry in the page-modification log. Because the page-modification log comprises 512 entries, the PML index is typically a value in the range 0–511. It is supported only on processors that support the 1-setting of the "enable PML" VM-execution control.
+
+9. **Guest deadline** This 64-bit field contains the value with which the guest timer will be configured. It is supported only on processors that support the 1-setting of the "APIC-timer virtualization" VM-execution control.
+
+## 27.5 HOST-STATE AREA
+
+This section describes fields contained in the host-state area of the VMCS.
+
+All fields in the host-state area correspond to processor registers.
+
+1. **Control registers** CR0, CR3, and CR4 (64 bits each; 32 bits on processors that do not support Intel 64 architecture).
+
+2. RSP and RIP (64 bits each; 32 bits on processors that do not support Intel 64 architecture).
+
+3. **Selector fields** (16 bits each) for the segment registers CS, SS, DS, ES, FS, GS, and TR. There is no field in the host-state area for the LDTR selector.
+
+4. **Base-address fields** for FS, GS, TR, GDTR, and IDTR (64 bits each; 32 bits on processors that do not support I-64 architecture).
+
+5. Lots of MSRs.
+
+6. The shadow-stack pointer register SSP (64 bits; 32 bits on processors that do not support Intel 64 architecture). This field is supported only on processors that support the 1-setting of the "load CET state" VM-exit control.
+
+---
+
+Note that some processor state components are loaded with fixed values on every VM exit in addition to the state identified here. There are no fields corresponding to those components in the host-state area.
+
+## 27.6 VM-EXECUTION CONTROL FIELDS
+
+The VM-execution control fields govern VMX non-root operation. They are divided into:
+  1. Pin-Based VM-Execution Controls.
+  2. Processor-Based VM-Execution Controls.
+  3. 
+  4. 
+  5. 
+  6. 
+
+### 27.6.1 Pin-Based VM-Execution Controls
+
+The pin-based VM-execution controls constitute a 32-bit vector that governs the handling of asynchronous events.
+
+| Bit Position | Name | Description |
+| ------------ | ---- | ----------- |
+| 0 | External-interrupt exiting | 0: External interrupts are normally delivered. |
+| | | 1: External interrupts cause VM exits and the value of RFLAGS.IF doesn't affect interrupt blocking. |
+| 3 | NMI exiting | Determines interactions between IRET and blocking by NMI. |
+| | | 0: Non-maskable interrupts are normally delivered using vector 2. |
+| | | 1: NMIs cause VM exits. |
+| 5 | Virtual NMIs | If 1, NMIs are never blocked and the "blocking by NMI" bit (bit 3) in the interruptibility-state field indicates "virtual-NMI blocking". This control also interacts with the "NMI-window exiting" VM-execution control. |
+| 6 | Activate VMX-preemption timer | If 1, the VMX-preemption timer counts down in VMX non-root operation. A VM exit occurs when the timer counts down to zero. |
+| 7 | Process-posted interrupts | If 1, the processor treats interrupts with the posted-interrupt notification vector specially, updating the virtual-APIC page with posted-interrupt requests. |
+
+All other bits in this field are reserved, some to 0 and some to 1. Software should consult the VMX capability MSRs `IA32_VMX_PINBASED_CTLS` and `IA32_VMX_TRUE_PINBASED_CTLS` to determine how to set reserved bits. Failure to set reserved bits properly causes subsequent VM entries to fail.
+
+The first processors to support the virtual-machine extensions supported only the 1-settings of bits 1, 2, and 4. The VMX capability MSR `IA32_VMX_PINBASED_CTLS` will always report that these bits must be 1.
+
+  - Logical processors that support the 0-settings of any of these bits will support the VMX capability MSR `IA32_VMX_TRUE_PINBASED_CTLS`, and software should consult this MSR to discover support for the 0-settings of these bits.
+
+  - Software that is not aware of the functionality of any one of these bits should set that bit to 1.
+
+---
+
+Note that some asynchronous events cause VM exits regardless of the settings of the pin-based VM-execution controls
+
+### 27.6.2 Processor-Based VM-Execution Controls
+
+The processor-based VM-execution controls constitute three vectors that govern the handling of synchronous events, mainly those caused by the execution of specific instructions. These vectors are:
+  1. Primary processor-based VM-execution controls (32 bits)
+  2. Secondary processor-based VM-execution controls (32 bits)
+  3. Tertiary VM-execution controls (64 bits)
+
+[HUGE TABLES]
+
+### 27.6.3 Exception Bitmap
+
+The exception bitmap is a 32-bit field that contains one bit for each exception. When an exception occurs, its vector is used to select a bit in this field. If the bit is 1, the exception causes a VM exit. If the bit is 0, the exception is delivered normally using the exception’s vector.
+
+Whether a page fault (exception with vector 14) causes a VM exit is determined by bit 14 in the exception bitmap as well as the error code produced by the page fault and two 32-bit fields in the VMCS (the page-fault error-code mask and page-fault error-code match).
+
+### 27.6.4 I/O-Bitmap Addresses
+
+The VM-execution control fields include the 64-bit physical addresses of I/O bitmaps A and B (each of which are 4 KBytes in size). I/O bitmap A contains one bit for each I/O port in the range 0000H through 7FFFH; I/O bitmap B contains bits for ports in the range 8000H through FFFFH.
+
+A logical processor uses these bitmaps if and only if the "use I/O bitmaps" control is 1. If the bitmaps are used, execution of an I/O instruction causes a VM exit if any bit in the I/O bitmaps corresponding to a port it accesses is 1. If the bitmaps are used, their addresses must be 4-KByte aligned.
+
+### 27.6.5 Time-Stamp Counter Offset and Multiplier
+
+The VM-execution control fields include a 64-bit TSC-offset field. If the "`RDTSC` exiting" control is 0 and the "use TSC offsetting" control is 1, this field controls executions of the `RDTSC` and `RDTSCP` instructions. It also controls executions of the `RDMSR` instruction that read from the `IA32_TIME_STAMP_COUNTER` MSR. For all of these, the value of the TSC offset is added to the value of the time-stamp counter, and the sum is returned to guest software in `EDX:EAX`.
+
+Processors that support the 1-setting of the "use TSC scaling" control also support a 64-bit TSC-multiplier field. If this control is 1 (and the "`RDTSC` exiting" control is 0 and the "use TSC offsetting" control is 1), this field also affects the executions of the `RDTSC`, `RDTSCP`, and `RDMSR` instructions identified above. Specifically, the contents of the time-stamp counter is first multiplied by the TSC multiplier before adding the TSC offset.
+
