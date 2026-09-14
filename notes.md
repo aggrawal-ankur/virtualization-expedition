@@ -273,7 +273,7 @@ The guest-state area also includes the following fields that characterize guest 
 
 6. **Page-directory-pointer-table entries** (PDPTEs; 64 bits each). These four fields (`PDPTE0`, `PDPTE1`, `PDPTE2`, and `PDPTE3`) are supported only on processors that support the 1-setting of the "enable EPT" VM-execution control. They correspond to the PDPTEs referenced by CR3 when PAE paging is in use. They are used only if the "enable EPT" VM-execution control is 1.
 
-7. **Guest interrupt status**: This 16-bit field characterizes part of the guest’s virtual-APIC state and does not correspond to any processor or APIC registers. It comprises two 8-bit subfields:
+7. **Guest interrupt status**: This 16-bit field characterizes part of the guest's virtual-APIC state and does not correspond to any processor or APIC registers. It comprises two 8-bit subfields:
 
    - **Requesting virtual interrupt (RVI)**: This is the low byte of the guest interrupt status. The processor treats this value as the vector of the highest priority virtual interrupt that is requesting service. The value 0 implies that there is no such interrupt.
 
@@ -312,10 +312,12 @@ Note that some processor state components are loaded with fixed values on every 
 The VM-execution control fields govern VMX non-root operation. They are divided into:
   1. Pin-Based VM-Execution Controls.
   2. Processor-Based VM-Execution Controls.
-  3. 
-  4. 
-  5. 
-  6. 
+  3. Exception Bitmap.
+  4. I/O-Bitmap Addresses.
+  5. Time-Stamp Counter Offset and Multiplier.
+  6. Guest/Host Masks and Read Shadows for CR0 and CR4.
+  7. CR3-Target Controls.
+  8. Controls for APIC Virtualization.
 
 ### 27.6.1 Pin-Based VM-Execution Controls
 
@@ -355,7 +357,7 @@ The processor-based VM-execution controls constitute three vectors that govern t
 
 ### 27.6.3 Exception Bitmap
 
-The exception bitmap is a 32-bit field that contains one bit for each exception. When an exception occurs, its vector is used to select a bit in this field. If the bit is 1, the exception causes a VM exit. If the bit is 0, the exception is delivered normally using the exception’s vector.
+The exception bitmap is a 32-bit field that contains one bit for each exception. When an exception occurs, its vector is used to select a bit in this field. If the bit is 1, the exception causes a VM exit. If the bit is 0, the exception is delivered normally using the exception's vector.
 
 Whether a page fault (exception with vector 14) causes a VM exit is determined by bit 14 in the exception bitmap as well as the error code produced by the page fault and two 32-bit fields in the VMCS (the page-fault error-code mask and page-fault error-code match).
 
@@ -371,3 +373,155 @@ The VM-execution control fields include a 64-bit TSC-offset field. If the "`RDTS
 
 Processors that support the 1-setting of the "use TSC scaling" control also support a 64-bit TSC-multiplier field. If this control is 1 (and the "`RDTSC` exiting" control is 0 and the "use TSC offsetting" control is 1), this field also affects the executions of the `RDTSC`, `RDTSCP`, and `RDMSR` instructions identified above. Specifically, the contents of the time-stamp counter is first multiplied by the TSC multiplier before adding the TSC offset.
 
+### 27.6.6 Guest/Host Masks and Read Shadows for CR0 and CR4
+
+VM-execution control fields include guest/host masks and read shadows for the CR0 and CR4 registers. These fields control executions of instructions that access those registers (including CLTS, LMSW, MOV CR, and SMSW).
+
+They are 64 bits on processors that support Intel 64 architecture and 32 bits on processors that do not.
+
+In general, bits set to 1 in a guest/host mask correspond to bits "owned" by the host:
+  - Guest attempts to set them (using CLTS, LMSW, or MOV to CR) to values differing from the corresponding bits in the corresponding read shadow cause VM exits.
+  - Guest reads (using MOV from CR or SMSW) return values for these bits from the corresponding read shadow.
+
+Bits cleared to 0 correspond to bits "owned" by the guest; guest attempts to modify them succeed and guest reads return values for these bits from the control register itself.
+
+### 27.6.7 CR3-Target Controls
+
+The VM-execution control fields include a set of 4 CR3-target values and a CR3-target count.
+  - The CR3-target values each have 64 bits on processors that support Intel 64 architecture and 32 bits on processors that do not.
+  - The CR3-target count has 32 bits on all processors.
+
+An execution of MOV to CR3 in VMX non-root operation does not cause a VM exit if its source operand matches one of these values. If the CR3-target count is n, only the first n CR3-target values are considered; if the CR3-target count is 0, MOV to CR3 always causes a VM exit.
+
+There are no limitations on the values that can be written for the CR3-target values. VM entry fails if the CR3-target count is greater than 4.
+
+Future processors may support a different number of CR3-target values. Software should read the VMX capability MSR `IA32_VMX_MISC` to determine the number of values supported.
+
+### 27.6.8 Controls for APIC Virtualization
+
+There are three mechanisms by which software accesses registers of the logical processor's local APIC.
+
+1. If the local APIC is in **xAPIC mode**, it can perform memory-mapped accesses to addresses in the 4-KByte page referenced by the physical address in the `IA32_APIC_BASE` MSR.
+
+2. If the local APIC is in x2APIC mode, it can access the local APIC's registers using the `RDMSR` and `WRMSR` instructions. If the local APIC does not support x2APIC mode, it is always in xAPIC mode.
+
+3. In 64-bit mode, it can access the local APIC's task-priority register (TPR) using the MOV CR8 instruction.
+
+Several processor-based VM-execution controls control such accesses. These are "use TPR shadow", "virtualize APIC accesses", "virtualize x2APIC mode", "virtual-interrupt delivery", "APIC-register virtualization", and "IPI virtualization". These controls interact with the following fields:
+
+1. **APIC-access address**: This 64-bit field contains the physical address of the 4-KByte APIC-access page.
+   - If the "virtualize APIC accesses" VM-execution control is 1, access to this page may cause VM exits or be virtualized by the processor.
+   - It exists only on processors that support the 1-setting of the "virtualize APIC accesses" VM-execution control.
+
+2. **Virtual-APIC address**: This 64-bit field contains the physical address of the 4-KByte virtual-APIC page. The processor uses the virtual-APIC page to virtualize certain accesses to APIC registers and to manage virtual interrupts. Depending on the setting of the controls indicated earlier, the virtual-APIC page may be accessed by the following operations:
+   - The MOV CR8 instructions.
+   - Accesses to the APIC-access page if, in addition, the "virtualize APIC accesses" VM-execution control is 1.
+   - The `RDMSR` and `WRMSR` instructions if, in addition, the value of ECX is in the range 800H–8FFH (indicating an APIC MSR) and the "virtualize x2APIC mode" VM-execution control is 1.
+
+   If the "use TPR shadow" VM-execution control is 1, VM entry ensures that the virtual-APIC address is 4-KByte aligned. The virtual-APIC address exists only on processors that support the 1-setting of the "use TPR shadow" VM-execution control.
+
+3. **TPR threshold**: A 32-bit field, whose bits 3:0 determine the threshold below which bits 7:4 of VTPR cannot fall. If the "virtual-interrupt delivery" VM-execution control is 0, a VM exit occurs after an operation (e.g., an execution of MOV to CR8) that reduces the value of those bits below the TPR threshold. The TPR threshold exists only on processors that support the 1-setting of the "use TPR shadow" VM-execution control.
+
+4. **EOI-exit bitmap**: It includes four 64-bit fields. They are used to determine which virtualized writes to the APIC's EOI register cause VM exits. These fields are supported only on processors that support the 1-setting of the "virtual-interrupt delivery" VM-execution control.
+
+   - `EOI_EXIT0` contains bits for vectors from 0 (bit 0) to 63 (bit 63).
+   - `EOI_EXIT1` contains bits for vectors from 64 (bit 0) to 127 (bit 63).
+   - `EOI_EXIT2` contains bits for vectors from 128 (bit 0) to 191 (bit 63).
+   - `EOI_EXIT3` contains bits for vectors from 192 (bit 0) to 255 (bit 63).
+
+5. **Posted-interrupt notification vector**: This 16-bit field is supported only on processors that support the 1-setting of the "process posted interrupts" VM-execution control. Its low 8 bits contain the interrupt vector that is used to notify a logical processor that virtual interrupts have been posted.
+
+6. **Posted-interrupt descriptor address**: This 64-bit field is supported only on processors that support the 1-setting of the "process posted interrupts" VM-execution control. It is the physical address of a 64-byte aligned posted interrupt descriptor.
+
+7. **PID-pointer table address**: This 64-bit field contains the physical address of the PID-pointer table. If the "IPI virtualization" VM-execution control is 1, the logical processor uses entries in this table to virtualize IPIs.
+
+8. **Last PID-pointer index**: This 16-bit field contains the index of the last entry in the PID-pointer table.
+
+---
+
+There are a lot more ### headings in section 27.6.
+
+## 27.7 VM-EXIT CONTROL FIELDS
+
+The VM-exit control fields govern the behavior of VM exits.
+
+### 27.7.1 VM-Exit Controls
+
+The VM-exit controls constitute two vectors that govern the basic operation of VM exits.
+  1. **Primary VM-exit controls** (32 bits).
+  2. **Secondary VM-exits controls** (64 bits).
+
+More details.
+
+### 27.7.2 VM-Exit Controls for MSRs
+
+A VMM may specify lists of MSRs to be stored and loaded on VM exits. The following VM-exit control fields determine how MSRs are stored on VM exits:
+
+  1. **VM-exit MSR-store count**: This 32-bit field specifies the number of MSRs to be stored on VM exit. It is recommended that this count not exceed 512. Otherwise, unpredictable processor behavior (including a machine check) may result during VM exit. Future implementations may allow more MSRs to be stored reliably. Software should consult the VMX capability MSR `IA32_VMX_MISC` to determine the number supported.
+
+  2. **VM-exit MSR-store address**: This 64-bit field contains the physical address of the VM-exit MSR-store area. The area is a table of entries, 16 bytes per entry, where the number of entries is given by the VM-exit MSR-store count. If the VM-exit MSR-store count is not zero, the address must be 16-byte aligned.
+
+---
+
+The following VM-exit control fields determine how MSRs are loaded on VM exits:
+
+  1. **VM-exit MSR-load count**: This 32-bit field contains the number of MSRs to be loaded on VM exit. It is recommended that this count not exceed 512. Otherwise, unpredictable processor behavior (including a machine check) may result during VM exit.
+
+  2. **VM-exit MSR-load address**: This 64-bit field contains the physical address of the VM-exit MSR-load area. The area is a table of entries, 16 bytes per entry, where the number of entries is given by the VM-exit MSR-load count. If the VM-exit MSR-load count is not zero, the address must be 16-byte aligned.
+
+## 27.8 VM-ENTRY CONTROL FIELDS
+
+The VM-entry control fields govern the behavior of VM entries.
+
+### 27.8.1 VM-Entry Controls
+
+The VM-entry controls constitute a 32-bit vector that governs the basic operation of VM entries.
+
+[DETAILS]
+
+### 27.8.2 VM-Entry Controls for MSRs
+
+A VMM may specify a list of MSRs to be loaded on VM entries. The following VM-entry control fields manage this functionality:
+
+  1. **VM-entry MSR-load count**: This 32-bit field contains the number of MSRs to be loaded on VM entry. It is recommended that this count not exceed 512. Otherwise, unpredictable processor behavior (including a machine check) may result during VM entry.
+
+  2. **VM-entry MSR-load address**: This 64-bit field contains the physical address of the VM-entry MSR-load area. The area is a table of entries, 16 bytes per entry, where the number of entries is given by the VM-entry MSR-load count. If the VM-entry MSR-load count is not zero, the address must be 16-byte aligned.
+
+### 27.8.3 VM-Entry Controls for Event Injection
+
+VM entry can be configured to conclude by delivering an event (after all guest state and MSRs have been loaded). This process is called **event injection** and is controlled by the following three VM-entry control fields:
+
+  1. **Injected-event identification field**: This 32-bit field provides details about the event to be injected. [DETAILS]
+
+  2. **Injected-event exception error code**: This 32-bit field is used if and only if the valid bit (bit 31) and the deliver-error-code bit (bit 11) are both set in the injected-event identification field.
+
+  3. **Injected-event data**: This 64-bit field is used if and only if the valid bit is set in the injected-event identification field and FRED transitions will be enabled following VM entry.
+
+  4. **VM-entry instruction length** For injection of events whose type is software interrupt, software exception, or privileged software exception, this 32-bit field is used to determine the value of RIP that is pushed on the stack. It is used also for injection of `SYSCALL` and `SYSEXIT` when FRED transitions would be enabled.
+
+Note that VM exits clear the valid bit (bit 31) in the injected-event identification field.
+
+## 27.9 VM-EXIT INFORMATION FIELDS
+
+The VMCS contains a section of fields that contain information about the most recent VM exit.
+
+On some processors, attempts to write to these fields with `VMWRITE` fail.
+
+[more details]
+
+## 27.10 VMCS TYPES: ORDINARY AND SHADOW
+
+Every VMCS is either an ordinary VMCS or a shadow VMCS. A VMCS's type is determined by the shadow-VMCS indicator in the VMCS region (this is the value of bit 31 of the first 4 bytes of the VMCS region.
+
+0 indicates an ordinary VMCS, while 1 indicates a shadow VMCS. Shadow VMCSs are supported only on processors that support the 1-setting of the "VMCS shadowing" VM-execution control.
+
+A shadow VMCS differs from an ordinary VMCS in two ways:
+  1. An ordinary VMCS can be used for VM entry but a shadow VMCS cannot. Attempts to perform VM entry when the current VMCS is a shadow VMCS fail.
+  2. The VMREAD and VMWRITE instructions can be used in VMX non-root operation to access a shadow VMCS but not an ordinary VMCS. This fact results from the following:
+     - If the "VMCS shadowing" VM-execution control is 0, execution of the VMREAD and VMWRITE instructions in VMX non-root operation always cause VM exits.
+     - If the "VMCS shadowing" VM-execution control is 1, execution of the VMREAD and VMWRITE instructions in VMX non-root operation can access the VMCS referenced by the VMCS link pointer
+     - If the "VMCS shadowing" VM-execution control is 1, VM entry ensures that any VMCS referenced by the VMCS link pointer is a shadow VMCS.
+
+In VMX root operation, both types of VMCSs can be accessed with the VMREAD and VMWRITE instructions.
+
+Software should not modify the shadow-VMCS indicator in the VMCS region of a VMCS that is active. Doing so may cause the VMCS to become corrupted. Before modifying the shadow-VMCS indicator, software should execute VMCLEAR for the VMCS to ensure that it is not active.
