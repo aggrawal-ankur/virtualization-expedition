@@ -14,6 +14,9 @@
 
 # Chapter 26
 
+Total Pages: 3
+Sessions: 1
+
 ## 26.2 VIRTUAL MACHINE ARCHITECTURE
 
 Virtual-machine extensions define processor-level support for virtual machines on Intel processors.
@@ -86,3 +89,135 @@ Before system software can enter VMX operation, it enables VMX by setting `CR4.V
   - System software leaves VMX operation by executing the `VMXOFF` instruction. CR4.VMXE can be cleared outside of VMX operation after executing of `VMXOFF`.
 
 Before executing `VMXON`, the software should allocate a naturally aligned 4-KByte region of memory that a logical processor may use to support VMX operation. This region is called the **VMXON region**. The address of the VMXON region (the VMXON pointer) is provided in an operand to VMXON.
+
+# Chapter 27
+
+Total Pages: 34
+Sessions:
+
+## 27.1 OVERVIEW
+
+A logical processor uses virtual-machine control data structures (VMCSs) while it is in VMX operation.
+  - These data structures manage transitions into and out of VMX non-root operation (VM entries and VM exits) as well as processor behavior in VMX non-root operation.
+  - This structure is manipulated by the new instructions `VMCLEAR`, `VMPTRLD`, `VMREAD`, and `VMWRITE`.
+
+A logical processor associates a region in memory with each VMCS. This region is called **the VMCS region**.
+  - Software references a specific VMCS using the 64-bit physical address of the region (a VMCS pointer). 
+  - VMCS pointers must be aligned on a 4-KByte boundary (bits 11:0 must be zero).
+
+---
+
+A VMM can use a different VMCS for each virtual machine that it supports. For a virtual machine with multiple logical processors (virtual processors), the VMM can use a different VMCS for each virtual processor.
+
+A logical processor may maintain a number of VMCSs that are **active**. The processor may optimize VMX operation by maintaining the state of an **active VMCS** in memory, on the processor, or both. 
+  - At any given time, at most one of the active VMCSs is the **current VMCS**. This document frequently uses the term "the VMCS" to refer to the current VMCS.
+  - The `VMLAUNCH`, `VMREAD`, `VMRESUME`, and `VMWRITE` instructions operate only on the **current VMCS**.
+
+The points below describe how a logical processor determines which VMCSs are active and which is current:
+
+1. The memory operand of the `VMPTRLD` instruction is the address of a VMCS. After this instruction is executed, the VMCS in it is both active and current on the logical processor it was executed on. Any other VMCS that had been active remains so, but no other VMCS is current.
+
+2. The memory operand of the `VMCLEAR` instruction is also the address of a VMCS. After execution of the instruction, that VMCS is neither active nor current on the logical processor. If the VMCS had been current on the logical processor, the logical processor no longer has a current VMCS.
+
+3. The **VMCS link pointer** field in the current VMCS is itself the address of a VMCS. If VM entry is performed successfully with the 1-setting of the "VMCS shadowing" VM-execution control, the VMCS referenced by the VMCS link pointer field becomes active on the logical processor. The identity of the current VMCS does not change.
+
+The `VMPTRST` instruction stores the address of the logical processor's current VMCS into a specified memory location. It stores the value `FFFFFFFF_FFFFFFFFH` if no current VMCS is found.
+
+---
+
+The **launch state** of a VMCS determines which VM-entry instruction should be used with that VMCS. 
+  1. The `VMLAUNCH` instruction requires a VMCS whose launch state is "clear".
+  2. The `VMRESUME` instruction requires a VMCS whose launch state is "launched".
+
+A logical processor maintains a VMCS's launch state in the corresponding VMCS region. The following items describe how a logical processor manages the launch state of a VMCS:
+  1. If the launch state of the current VMCS is "clear", successful execution of the VMLAUNCH instruction changes the launch state to "launched".
+  2. The memory operand of the `VMCLEAR` instruction is the address of a VMCS. After execution of the instruction, the launch state of that VMCS is "clear".
+
+**Note that there are no other ways to modify the launch state of a VMCS (it cannot be modified using VMWRITE) or discover it (it cannot be read using VMREAD).**
+
+## 27.2 FORMAT OF THE VMCS REGION
+
+A VMCS region comprises up to 4-KBytes. The exact size is implementation specific and can be determined by consulting the VMX capability MSR `IA32_VMX_BASIC`.
+
+### VMCS revision identifier
+
+The first 4 bytes of the VMCS region contain the VMCS revision identifier at bits `30:0`.
+
+Processors that maintain VMCS data in different formats use different VMCS revision identifiers. These identifiers enable software to avoid using a VMCS region formatted for one processor on a processor that uses a different format.
+
+Bit 31 of this 4-byte region indicates whether the VMCS is a shadow VMCS.
+
+---
+
+Software should write the VMCS revision identifier to the VMCS region before using that region for a VMCS. It is never written by the processor.
+
+`VMPTRLD` fails if its operand references a VMCS region whose VMCS revision identifier differs from that used by the processor.
+
+Software can discover the VMCS revision identifier that a processor uses by reading the VMX capability MSR `IA32_VMX_BASIC`.
+
+---
+
+Software should clear or set the shadow-VMCS indicator depending on whether the VMCS is to be an ordinary VMCS or a shadow VMCS.
+
+`VMPTRLD` fails if the shadow-VMCS indicator is 1 and the processor does not support the 1-setting of the "VMCS shadowing" VM-execution control.
+
+Software can discover support for this setting by reading the VMX capability MSR `IA32_VMX_PROCBASED_CTLS2`.
+
+### VMX-abort indicator
+
+The next 4 bytes of the VMCS region are used for the VMX-abort indicator.
+
+The contents of these bits do not control processor operation in any way. A logical processor writes a non-zero value into these bits if a VMX abort occurs. Software may also write into this field.
+
+### VMCS data
+
+The remainder of the VMCS region is used for VMCS data, the parts that control VMX non-root operation and VMX transitions.
+
+The format of this data is implementation-specific. 
+
+To ensure proper behavior in VMX operation, software should maintain the VMCS region and related structures in writeback cacheable memory.
+
+Software should consult the VMX capability MSR `IA32_VMX_BASIC`.
+
+## 27.3 ORGANIZATION OF VMCS DATA
+
+The VMCS data is organized into six logical groups.
+
+1. **Guest-state area**. Processor state is saved into the guest-state area on VM exits and loaded from there on VM entries.
+
+2. **Host-state area**. Processor state is loaded from the host-state area on VM exits.
+
+3. **VM-execution control fields**. These fields control processor behavior in VMX non-root operation. They determine, in part, the causes of VM exits.
+
+4. **VM-exit control fields**. These fields control VM exits.
+
+5. **VM-entry control fields**. These fields control VM entries.
+
+6. **VM-exit information fields**. These fields receive information on VM exits and describe the cause and the nature of VM exits. On some processors, these fields are read-only. Software can discover whether these fields can be written by reading the VMX capability MSR `IA32_VMX_MISC`.
+
+The VM-execution control fields, the VM-exit control fields, and the VM-entry control fields are sometimes referred to collectively as VMX controls.
+
+## 27.4 GUEST-STATE AREA
+
+VM entries load processor state from these fields and VM exits store processor state into these fields.
+
+### 27.4.1 Guest Register State
+
+The following fields in the guest-state area correspond to processor registers:
+
+1. Control registers CR0, CR3, and CR4 (64 bits each; 32 bits on processors that do not support Intel 64 architecture).
+
+2. Debug register DR7 (64 bits; 32 bits on processors that do not support Intel 64 architecture).
+
+3. RSP, RIP, and RFLAGS (64 bits each; 32 bits on processors that do not support Intel 64 architecture).
+
+<!-- 4. The following fields for each of the registers CS, SS, DS, ES, FS, GS, LDTR, and TR:
+   - Selector (16 bits).
+   - Base address (64 bits; 32 bits on processors that do not support Intel 64 architecture). The base-address fields for CS, SS, DS, and ES have only 32 architecturally-defined bits; nevertheless, the corresponding VMCS fields have 64 bits on processors that support Intel 64 architecture.
+   - Segment limit (32 bits). The limit field is always a measure in bytes.
+     - Access rights (32 bits).
+     - Bit 3:0 represent the segment type, bit 4 is the (S) descriptor type (0 for system and 1 for code/data), bit 6:5 represent the descriptor privilege level (DPL), and bit 7 represent the segment present (P).
+     - The low 16 bits correspond to bits `23:8` of the upper 32 bits of a 64-bit segment descriptor. While bits 19:16 of code-segment and data-segment descriptors correspond to the upper 4 bits of the segment limit, the corresponding bits (bits 11:8) are reserved in this VMCS field.
+     - Bit 16 indicates an unusable segment. Attempts to use such a segment fault except in 64-bit mode. In general, a segment register is unusable if it has been loaded with a null selector. There are a few exceptions to this statement.
+     - Bits 31:17 are reserved.
+-->
