@@ -1,3 +1,5 @@
 kvm-src-only/
 kvm-hello-world/
 
+*.o
+*.bin
