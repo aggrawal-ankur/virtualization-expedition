@@ -28,9 +28,9 @@ struct vm {
 	/* All the memory slots backing the guest memory. */
 	struct {
 		struct kvm_userspace_memory_region reset;
-		struct kvm_userspace_memory_region ivt;
 		struct kvm_userspace_memory_region cs;
 		struct kvm_userspace_memory_region ds;
+		struct kvm_userspace_memory_region es;
 		struct kvm_userspace_memory_region ss;
 	} guest_mem_slots;
 };
@@ -284,8 +284,8 @@ int init_real_mode(
 	struct kvm_regs  regs  = {0};    /* General CPU registers. */
 	struct kvm_sregs sregs = {0};    /* Special CPU registers. */
 
-	struct kvm_userspace_memory_region ivt_region, cs_region;
-	struct kvm_userspace_memory_region ds_region,  ss_region;
+	struct kvm_userspace_memory_region es_region, cs_region;
+	struct kvm_userspace_memory_region ds_region, ss_region;
 
 
 	/* [STEP 1]: Retreive register state from KVM. */
@@ -377,14 +377,14 @@ int init_real_mode(
 	 * software initialization.
 	 */
 
-	void* ivt_mem = mmap(
+	void* es_mem = mmap(
 		NULL,
 		0x10000,
 		PROT_READ | PROT_WRITE,
 		MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
 		-1, 0
 	);
-	if (ivt_mem == MAP_FAILED){
+	if (es_mem == MAP_FAILED){
 		perror("mmap mem");
 		exit(1);
 	}
@@ -431,11 +431,11 @@ int init_real_mode(
 	 * corresponding to these memory reiongs.
 	 */
 
-	ivt_region.guest_phys_addr = 0x0;
-	ivt_region.userspace_addr  = (unsigned long)(ivt_mem);
-	ivt_region.memory_size = 0x10000;
-	ivt_region.slot  = 1;
-	ivt_region.flags = 0x0;
+	es_region.guest_phys_addr = 0x0;
+	es_region.userspace_addr  = (unsigned long)(es_mem);
+	es_region.memory_size = 0x10000;
+	es_region.slot  = 1;
+	es_region.flags = 0x0;
 
 	cs_region.guest_phys_addr = 0x10000;
 	cs_region.userspace_addr  = (unsigned long)(cs_mem);
@@ -458,8 +458,8 @@ int init_real_mode(
 
 	/* [STEP 6]: Inform KVM about these memory regions. */
 
-	if (ioctl(vm->vm_fd, KVM_SET_USER_MEMORY_REGION, &ivt_region) < 0) {
-		perror("KVM_SET_USER_MEMORY_REGION ivt_region");
+	if (ioctl(vm->vm_fd, KVM_SET_USER_MEMORY_REGION, &es_region) < 0) {
+		perror("KVM_SET_USER_MEMORY_REGION es_region");
 		exit(1);
 	}
 
@@ -481,17 +481,17 @@ int init_real_mode(
 
 	/* [STEP 7]: Keep a record of these memory slots in the VM struct. */
 
-	vm->guest_mem_slots.ivt = ivt_region;
-	vm->guest_mem_slots.cs  = cs_region;
-	vm->guest_mem_slots.ds  = ds_region;
-	vm->guest_mem_slots.ss  = ss_region;
+	vm->guest_mem_slots.es = es_region;
+	vm->guest_mem_slots.cs = cs_region;
+	vm->guest_mem_slots.ds = ds_region;
+	vm->guest_mem_slots.ss = ss_region;
 
 
 	/*
 	 * [STEP 8]: Copy the bootstrap instruction in the reset 
-	 * memory region. When it is executed, it will jump to 
-	 * the newly reserved CS where the guest instructions for 
-	 * software initialization are placed.
+	 * memory region. When it is executed, it will initiate a 
+	 * far jump to the CS segment where the guest instructions 
+	 * for software initialization are placed.
 	 */
 	copy_guest_code(
 		"./bootstrap.bin", 
