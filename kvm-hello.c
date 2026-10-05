@@ -11,24 +11,32 @@
 
 /* ---+---+---+--- Data Structures ---+---+---+--- */
 
-/* Host-side representation of the VM created here. */
+/* Host-side representation of the VM. */
 struct vm {
-	int   sys_fd;    /* File descriptor for /dev/kvm. */
-	int   fd;        /* File descriptor for the KVM virtual machine. */
-	char *mem;       /* Pointer to the memory region that the program maps for the guest's memory. */
+	/* File descriptor for /dev/kvm. */
+	int dev_kvm_fd;
+
+	/* File descriptor for the KVM virtual machine. */
+	int vm_fd;
+
+	/* File descriptor representing the created vCPU. */
+	int vcpu_fd;
+
+	/* The object for KVM_RUN operation associated to the vCPU above. */
+	struct kvm_run *kvm_run;
+
+	/* All the memory slots backing the guest memory. */
+	struct {
+		struct kvm_userspace_memory_region reset;
+		struct kvm_userspace_memory_region ivt;
+		struct kvm_userspace_memory_region cs;
+		struct kvm_userspace_memory_region ds;
+		struct kvm_userspace_memory_region ss;
+	} guest_mem_slots;
 };
 
-/* Host-side representation of the vCPU created for this VM. */
-struct vcpu {
-	int fd;      /* File descriptor representing the created VCPU. */
-	struct kvm_run *kvm_run;    /* [?] */
-};
-
-extern const unsigned char guest_code[], guest_code_end[];
-
-
-/* Performs initial setup of a VM. */
-void vm_init(struct vm *vm, size_t mem_size)
+/* Perform initial VM setup. */
+void vm_init(struct vm *vm)
 {
 	/* KVM API Version */
 	int api_ver;
@@ -37,18 +45,22 @@ void vm_init(struct vm *vm, size_t mem_size)
 	 * This struct describes the mapping between a region 
 	 * of the host process's virtual memory and a region 
 	 * of the guest's physical address space.
+	 * 
+	 * reset_mem_region describes the memory region defined 
+	 * in the x86 architecture that is required when the 
+	 * process boots after a reset.
 	 */
-	struct kvm_userspace_memory_region mem_region;
+	struct kvm_userspace_memory_region reset_mem_region;
 
 	/* [STEP 1]: Open a handle to the kernel's kvm interface. */
-	vm->sys_fd = open("/dev/kvm", O_RDWR);
-	if (vm->sys_fd < 0) {
+	vm->dev_kvm_fd = open("/dev/kvm", O_RDWR);
+	if (vm->dev_kvm_fd < 0) {
 		perror("open /dev/kvm");
 		exit(1);
 	}
 
 	/* [STEP 2]: Query the KVM API version. */
-	api_ver = ioctl(vm->sys_fd, KVM_GET_API_VERSION, 0);
+	api_ver = ioctl(vm->dev_kvm_fd, KVM_GET_API_VERSION, 0);
 	if (api_ver < 0) {
 		perror("KVM_GET_API_VERSION");
 		exit(1);
@@ -69,103 +81,107 @@ void vm_init(struct vm *vm, size_t mem_size)
 	 * represent a VM inside the kernel and gives 
 	 * userspace a handle to them.
 	*/
-	vm->fd = ioctl(vm->sys_fd, KVM_CREATE_VM, 0);
-	if (vm->fd < 0) {
+	vm->vm_fd = ioctl(vm->dev_kvm_fd, KVM_CREATE_VM, 0);
+	if (vm->vm_fd < 0) {
 		perror("KVM_CREATE_VM");
 		exit(1);
 	}
 
 	/*
-	 * [STEP 6]: Reserve a piece of host's userspace memory 
-	 * that will be used as the guest's physical memory.
+	 * [STEP 5]: Reserve a region in the host's userspace 
+	 * memory that will be used as the region where the 
+	 * execution will start when the processor boots after 
+	 * a reset.
 	 */
-	vm->mem = mmap(
+	void* reset_mem = mmap(
 		NULL, 
-		mem_size, 
+		0x10000, 
 		PROT_READ | PROT_WRITE,
 		MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, 
 		-1, 0
 	);
-	if (vm->mem == MAP_FAILED) {
+	if (reset_mem == MAP_FAILED) {
 		perror("mmap mem");
 		exit(1);
 	}
 
 	/* A hint to the kernel to enable KSM. */
-	madvise(vm->mem, mem_size, MADV_MERGEABLE);
+	madvise(reset_mem, 0x10000, MADV_MERGEABLE);
 
-	/*
-	 * [STEP 7]: Set metadata about the host userspace 
-	 * memory region and the guest physical region it 
-	 * powers.
-	 */
+	/* [STEP 6]: Set the metadata about the reset_mem_region */
 
 	/* Where the memory exists in the host process? */
-	mem_region.userspace_addr = (unsigned long)(vm->mem);
+	reset_mem_region.userspace_addr = (unsigned long)(reset_mem);
 
 	/*
 	 * Where the host process's memory appears in the 
 	 * guest's physical address space?
 	 */
-	mem_region.guest_phys_addr = 0xffff0000;
+	reset_mem_region.guest_phys_addr = 0xffff0000;
 
 	/* The size of the memory. */
-	mem_region.memory_size = mem_size;
+	reset_mem_region.memory_size = 0x10000;
 
-	mem_region.slot  = 0;    /* # guest memory region. */
-	mem_region.flags = 0;    /* [?] */
+	reset_mem_region.slot  = 0;    /* # guest memory region. */
+	reset_mem_region.flags = 0;    /* [?] */
 
-	/* [STEP 8]: Pass the updated mem_region description to KVM. */
+
+	/* [STEP 7]: Notify KVM about this memory slot. */
 	if (
-		ioctl(vm->fd, KVM_SET_USER_MEMORY_REGION, &mem_region) < 0
+		ioctl(vm->vm_fd, KVM_SET_USER_MEMORY_REGION, &reset_mem_region) < 0
 	){
 		perror("KVM_SET_USER_MEMORY_REGION");
 		exit(1);
 	}
+
+	/*
+	 * [STEP 8]: Keep a record of this memory slot config in 
+	 * the VM struct.
+	 */
+	vm->guest_mem_slots.reset = reset_mem_region;
 }
 
 /* Create and initialize a vCPU. */
-void vcpu_init(struct vm *vm, struct vcpu *vcpu)
+void vcpu_init(struct vm *vm)
 {
 	int vcpu_mmap_size;
 
 	/* [STEP 1]: Create a vCPU. */
-	vcpu->fd = ioctl(vm->fd, KVM_CREATE_VCPU, 0);
-	if (vcpu->fd < 0) {
+	vm->vcpu_fd = ioctl(vm->vm_fd, KVM_CREATE_VCPU, 0);
+	if (vm->vcpu_fd < 0) {
 		perror("KVM_CREATE_VCPU");
 		exit(1);
 	}
 
-	/* [STEP 2]: Ask the kernel the total memory 
-			required to create a vCPU. */
-	vcpu_mmap_size = ioctl(vm->sys_fd, KVM_GET_VCPU_MMAP_SIZE, 0);
+	/* [STEP 2]: Ask the kernel the total memory required by a vCPU. */
+	vcpu_mmap_size = ioctl(vm->dev_kvm_fd, KVM_GET_VCPU_MMAP_SIZE, 0);
 	if (vcpu_mmap_size <= 0) {
 		perror("KVM_GET_VCPU_MMAP_SIZE");
 		exit(1);
 	}
 
-	/* [STEP 3]: Reserve memory for the vCPU. */
-	vcpu->kvm_run = mmap(
+	/* [STEP 3]: Reserve memory for the vCPU's KVM_RUN object. */
+	vm->kvm_run = mmap(
 		NULL, 
 		vcpu_mmap_size, 
 		PROT_READ | PROT_WRITE,
-		MAP_SHARED, vcpu->fd, 0
+		MAP_SHARED, vm->vcpu_fd, 0
 	);
-	if (vcpu->kvm_run == MAP_FAILED) {
+	if (vm->kvm_run == MAP_FAILED) {
 		perror("mmap kvm_run");
 		exit(1);
 	}
 }
 
 /* Run a VM. */
-int run_vm(struct vm *vm, struct vcpu *vcpu, size_t sz, void* ds_mem)
+int run_vm(struct vm *vm)
 {
 	struct kvm_regs regs = {0};
 	uint64_t memval = 0;
 
 	for (;;) {
 		/* Start guest code execution. */
-		if (ioctl(vcpu->fd, KVM_RUN, 0) < 0) {
+		if (ioctl(vm->vcpu_fd, KVM_RUN, 0) < 0) {
 			perror("KVM_RUN");
 			exit(1);
 		}
@@ -175,7 +191,7 @@ int run_vm(struct vm *vm, struct vcpu *vcpu, size_t sz, void* ds_mem)
 		 * The userspace accesses the shared vCPU state to 
 		 * analyze the cause of exit and act appropriately.
 		 */
-		switch (vcpu->kvm_run->exit_reason) {
+		switch (vm->kvm_run->exit_reason) {
 			/*
 			 * The guest ends with a HLT instruction. 
 			 * If that's the reason, exit the loop.
@@ -183,17 +199,19 @@ int run_vm(struct vm *vm, struct vcpu *vcpu, size_t sz, void* ds_mem)
 		  case KVM_EXIT_HLT:
 		  	goto check;
 
-			/* If the VM EXIT is caused by an I/O 
-				 operation, handle it below and resume. */
+			/*
+			 * If the VM EXIT is caused by an I/O operation, 
+			 * handle it below and resume the VM.
+			 */
   		case KVM_EXIT_IO:
   			if (
-					vcpu->kvm_run->io.direction == KVM_EXIT_IO_OUT &&
-  			  vcpu->kvm_run->io.port == 0xE9
+					vm->kvm_run->io.direction == KVM_EXIT_IO_OUT &&
+  			  vm->kvm_run->io.port == 0xE9
 				){
-  				char *p = (char*)(vcpu->kvm_run);
+  				char *p = (char*)(vm->kvm_run);
   				fwrite(
-						p + vcpu->kvm_run->io.data_offset,
-						vcpu->kvm_run->io.size, 1, stdout
+						p + vm->kvm_run->io.data_offset,
+						vm->kvm_run->io.size, 1, stdout
 					);
   				fflush(stdout);
   				continue;
@@ -204,7 +222,7 @@ int run_vm(struct vm *vm, struct vcpu *vcpu, size_t sz, void* ds_mem)
   			fprintf(
 					stderr,	
 					"Got exit_reason %d, expected KVM_EXIT_HLT (%d)\n",
-  				vcpu->kvm_run->exit_reason, KVM_EXIT_HLT
+  				vm->kvm_run->exit_reason, KVM_EXIT_HLT
 				);
   			exit(1);
 		}
@@ -212,13 +230,15 @@ int run_vm(struct vm *vm, struct vcpu *vcpu, size_t sz, void* ds_mem)
 
 	check:
 		/* Get the general-purpose registers. */
-		if (ioctl(vcpu->fd, KVM_GET_REGS, &regs) < 0) {
+		if (ioctl(vm->vcpu_fd, KVM_GET_REGS, &regs) < 0) {
 			perror("KVM_GET_REGS");
 			exit(1);
 		}
 
-		/* Check if rax contains the intended value. 
-		   It is 42, as per the guest machine-code. */
+		/*
+		 * Check if rax contains the intended value. It is 
+		 * 42, as per the guest machine-code.
+		 */
 		if (regs.rax != 42) {
 			printf("Wrong result: {R, E,}AX is %lld\n", regs.rax);
 			return 1;
@@ -228,7 +248,7 @@ int run_vm(struct vm *vm, struct vcpu *vcpu, size_t sz, void* ds_mem)
 
 		/* The guest stores 42 at ds:0x0. We check the 
 			 memory at 0x400 into sz. */
-		memcpy(&memval, ds_mem, sz);
+		memcpy(&memval, (void*)(vm->guest_mem_slots.ds.userspace_addr), 2);
 		if (memval != 42) {
 			printf(
 				"Wrong result: memory at ds:0x0 is %lld\n",
@@ -259,7 +279,6 @@ int copy_guest_code(const char* filename, void* dest_host_mem){
 /* Bring the processor in real mode. */
 int init_real_mode(
 	struct vm *vm, 
-	struct vcpu *vcpu, 
 	const char* filename
 ){
 	struct kvm_regs  regs  = {0};    /* General CPU registers. */
@@ -271,24 +290,24 @@ int init_real_mode(
 
 	/* [STEP 1]: Retreive register state from KVM. */
 
-	if (ioctl(vcpu->fd, KVM_GET_REGS, &regs) < 0) {
+	if (ioctl(vm->vcpu_fd, KVM_GET_REGS, &regs) < 0) {
 		perror("KVM_GET_REGS");
 		exit(1);
 	}
 
-	if (ioctl(vcpu->fd, KVM_GET_SREGS, &sregs) < 0) {
+	if (ioctl(vm->vcpu_fd, KVM_GET_SREGS, &sregs) < 0) {
 		perror("KVM_GET_SREGS");
 		exit(1);
 	}
 
 
-	/* [STEP 2]: Set the general-purpose registers. */
+	/*
+	 * [STEP 2]: Set the registers as per the Intel x86 
+	 * reset configuration.
+	 */
 
 	regs.rflags = 0x00000002;    /* Bit 1's mask is 2. */
 	regs.rip    = 0x0000FFF0;
-
-
-	/* [STEP 3]: Set the special-purpose registers. */
 
   sregs.cr0 = 0x60000010;
   sregs.cr2 = 0x00000000;
@@ -339,20 +358,15 @@ int init_real_mode(
 
   sregs.efer = 0x0000000000000000;
 
-	// printf("here\n");
 
+	/* [STEP 3]: Inform KVM about the updated register state (sync).*/
 
-	/*
-	 * [STEP 3]: Inform KVM about the updated register 
-	 * state (sync).
-	 */
-
-	if (ioctl(vcpu->fd, KVM_SET_REGS, &regs) < 0) {
+	if (ioctl(vm->vcpu_fd, KVM_SET_REGS, &regs) < 0) {
 		perror("KVM_SET_REGS");
 		exit(1);
 	}
 
-	if (ioctl(vcpu->fd, KVM_SET_SREGS, &sregs) < 0) {
+	if (ioctl(vm->vcpu_fd, KVM_SET_SREGS, &sregs) < 0) {
 		perror("KVM_SET_SREGS");
 		exit(1);
 	}
@@ -444,59 +458,76 @@ int init_real_mode(
 
 	/* [STEP 6]: Inform KVM about these memory regions. */
 
-	if (ioctl(vm->fd, KVM_SET_USER_MEMORY_REGION, &ivt_region) < 0) {
+	if (ioctl(vm->vm_fd, KVM_SET_USER_MEMORY_REGION, &ivt_region) < 0) {
 		perror("KVM_SET_USER_MEMORY_REGION ivt_region");
 		exit(1);
 	}
 
-	if (ioctl(vm->fd, KVM_SET_USER_MEMORY_REGION, &cs_region) < 0) {
+	if (ioctl(vm->vm_fd, KVM_SET_USER_MEMORY_REGION, &cs_region) < 0) {
 		perror("KVM_SET_USER_MEMORY_REGION cs_region");
 		exit(1);
 	}
 
-	if (ioctl(vm->fd, KVM_SET_USER_MEMORY_REGION, &ds_region) < 0) {
+	if (ioctl(vm->vm_fd, KVM_SET_USER_MEMORY_REGION, &ds_region) < 0) {
 		perror("KVM_SET_USER_MEMORY_REGION ds_region");
 		exit(1);
 	}
 
-	if (ioctl(vm->fd, KVM_SET_USER_MEMORY_REGION, &ss_region) < 0) {
+	if (ioctl(vm->vm_fd, KVM_SET_USER_MEMORY_REGION, &ss_region) < 0) {
 		perror("KVM_SET_USER_MEMORY_REGION ss_region");
 		exit(1);
 	}
 
 
-	/* [STEP 9]: */
-	copy_guest_code("./bootstrap.bin", vm->mem + 0xfff0);
+	/* [STEP 7]: Keep a record of these memory slots in the VM struct. */
+
+	vm->guest_mem_slots.ivt = ivt_region;
+	vm->guest_mem_slots.cs  = cs_region;
+	vm->guest_mem_slots.ds  = ds_region;
+	vm->guest_mem_slots.ss  = ss_region;
+
 
 	/*
-	 * [STEP 8]: Copy the guest code to the memory 
-	 * region for CS.
+	 * [STEP 8]: Copy the bootstrap instruction in the reset 
+	 * memory region. When it is executed, it will jump to 
+	 * the newly reserved CS where the guest instructions for 
+	 * software initialization are placed.
 	 */
+	copy_guest_code(
+		"./bootstrap.bin", 
+		(void*)(vm->guest_mem_slots.reset.userspace_addr + 0xfff0)
+	);
 
-	copy_guest_code("./guest-setup.bin", cs_mem);
+	/*
+	 * [STEP 9]: Copy the software initialization guest code into 
+	 * the CS memory region.
+	 */
+	copy_guest_code(
+		"./guest-setup.bin", 
+		(void*)(vm->guest_mem_slots.cs.userspace_addr)
+	);
 
 	/* Run the VM. */
-	return run_vm(vm, vcpu, 2, ds_mem);
+	return run_vm(vm);
 }
 
 int main(int argc, char **argv)
 {
 	struct vm   vm;
-	struct vcpu vcpu;
 
 	printf("Creating and Initializing a VM....\n");
-	vm_init(&vm, 0x10000);
+	vm_init(&vm);
 	printf("VM Initialized.\n");
 
 	printf("Creating and Initializing a vCPU....\n");
-	vcpu_init(&vm, &vcpu);
+	vcpu_init(&vm);
 	printf("vCPU Initialized.\n");
 
 	printf("Making the vCPU enter the guest in real-address\n");
 	printf("mode as per the x86 reset configuration and\n");
 	printf("perform essential software initializtion.\n");
 
-	if (init_real_mode(&vm, &vcpu, "./guest-setup.s") != 0){
+	if (init_real_mode(&vm, "./guest-setup.s") != 0){
 		fprintf(stderr, "Real-Address mode initialization failed.\n");
 		exit(1);
 	}
